@@ -9,6 +9,9 @@ public class Particle {
     public ParticleType type;
     public int framesSinceChange;
 
+    public Particle parent = null; // Track which particle caused this one
+    public long creationTime; // Track when the particle was created
+
     public Particle(double x, double y, double theta, ParticleType type) {
         this.x = x;
         this.y = y;
@@ -16,8 +19,14 @@ public class Particle {
         this.dy = Math.sin(theta) * type.getDefaultSpeed();
         this.type = type;
         this.framesSinceChange = FRAME_COOLDOWN;
+        this.creationTime = System.currentTimeMillis();
     }
 
+    // Add this helper method
+    public void setParent(Particle parent) {
+        this.parent = parent;
+        this.creationTime = System.currentTimeMillis();
+    }
     public Particle(double x, double y, ParticleType type) {
         this(x, y, 0, type);
     }
