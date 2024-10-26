@@ -36,14 +36,16 @@ public class Game extends JPanel implements MouseListener, MouseMotionListener, 
         }).start();
     }
 
-    public static boolean colliding(Particle a, Particle b) {
-        double distance = Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2));
-        return distance < a.r + b.r;
-    }
+    // public static boolean colliding(Particle a, Particle b) {
+    //     double distance = Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2));
+    //     return distance < a.getRadius() + b.getRadius();
+    // }
 
     public static boolean closeColliding(Particle a, Particle b) {
+        if (a.framesSinceChange < Particle.FRAME_COOLDOWN || b.framesSinceChange < Particle.FRAME_COOLDOWN) 
+            return false;
         double distance = Math.sqrt(Math.pow(a.x - b.x, 2) + Math.pow(a.y - b.y, 2));
-        return distance < Math.max(a.r, b.r);
+        return distance < Math.max(a.getRadius(), b.getRadius());
     }
 
     private ArrayList<Particle> neutrons;
@@ -53,13 +55,9 @@ public class Game extends JPanel implements MouseListener, MouseMotionListener, 
     public static final int PREF_W = 800;
     public static final int PREF_H = 600;
     public static final double PI2 = Math.PI * 2;
-    public static final double NEUTRON_SPEED = 5;
-    public static final double NEUTRON_RADIUS = 5;
-    public static final double NEUTRON_TEMP_INC = 5;
-    public static final double FUEL_RADIUS = 20;
     public static final double NEUTRON_DECAY_PROB = 0.01;
     public static final double URANIUM_RECAY_PROB = 0.001;
-    public static final double DEPLETED_DECAY_PROB = 0.01;
+    public static final double DEPLETED_DECAY_PROB = 0.001;
     public static final double IDLE_TEMP_MUL = 0.98;
 
     public Game() {
@@ -77,8 +75,7 @@ public class Game extends JPanel implements MouseListener, MouseMotionListener, 
             double x = Math.random() * PREF_W;
             double y = Math.random() * PREF_H;
             double theta = Math.random() * PI2;
-
-            neutrons.add(new Particle(x, y, theta, NEUTRON_SPEED, NEUTRON_RADIUS, Particle.PARTICLE_TYPE_NEUTRON));
+            neutrons.add(new Particle(x, y, theta, ParticleType.NEUTRON));
         }
 
         // Create a grid of uranium particles
@@ -91,8 +88,8 @@ public class Game extends JPanel implements MouseListener, MouseMotionListener, 
                 double x = xIdx * cellWidth + 0.5 * cellWidth;
                 double y = yIdx * cellHeight + 0.5 * cellHeight;
 
-                fuels.add(new Particle(x, y, FUEL_RADIUS,
-                        Math.random() < 0.3 ? Particle.PARTICLE_TYPE_URANIUM : Particle.PARTICLE_TYPE_DEPLETED));
+                ParticleType type = Math.random() < 0.3 ? ParticleType.URANIUM : ParticleType.DEPLETED;
+                fuels.add(new Particle(x, y, type));
             }
         }
 
@@ -100,107 +97,116 @@ public class Game extends JPanel implements MouseListener, MouseMotionListener, 
     }
 
     private Timer t = new Timer(1000 / 60, (e) -> {
-
         temperature *= IDLE_TEMP_MUL;
 
+        // Handle fuel transitions
         for (int i = 0; i < fuels.size(); i++) {
             Particle fuel = fuels.get(i);
+            fuel.tick();
 
             // Chance to turn Depleted to Uranium
-            if (fuel.type == Particle.PARTICLE_TYPE_DEPLETED && Math.random() < URANIUM_RECAY_PROB) {
-                fuel.type = Particle.PARTICLE_TYPE_URANIUM;
+            if (fuel.type == ParticleType.DEPLETED && Math.random() < URANIUM_RECAY_PROB) {
+                fuel.setType(ParticleType.URANIUM);
             }
-            
+
             // Chance to turn Depleted to Graphite
-            else if (fuel.type == Particle.PARTICLE_TYPE_DEPLETED && Math.random() < DEPLETED_DECAY_PROB) {
-                fuel.type = Particle.PARTICLE_TYPE_GRAPHITE;
-                neutrons.add(new Particle(fuel.x, fuel.y, Math.random() * PI2, NEUTRON_SPEED, NEUTRON_RADIUS, Particle.PARTICLE_TYPE_NEUTRON));
+            else if (fuel.type == ParticleType.DEPLETED && Math.random() < DEPLETED_DECAY_PROB) {
+                fuel.setType(ParticleType.GRAPHITE);
+                neutrons.add(new Particle(fuel.x, fuel.y, Math.random() * PI2, ParticleType.NEUTRON));
             }
         }
-        
+
         boolean click = false;
         for (int i = 0; i < neutrons.size(); i++) {
             Particle neutron = neutrons.get(i);
+            neutron.tick();
+
+            // Handle neutron decay
             if (Math.random() < NEUTRON_DECAY_PROB) {
                 neutrons.remove(i);
                 i--;
-                temperature += NEUTRON_TEMP_INC;
+                temperature += ParticleType.NEUTRON.getTemperatureIncrease();
                 continue;
             }
+
             neutron.move();
             neutron.bounceBounds(0, PREF_W, 0, PREF_H);
 
-            // Check if it is a uranium. If so, check if colliding with a neutron. If so,
-            // delete the neutron, produce 3 random neutrons, and deplete
+            // Check for collisions with fuel particles
             searchForNeutronLoop: for (int j = 0; j < fuels.size(); j++) {
                 Particle fuel = fuels.get(j);
-                if (fuel.type == Particle.PARTICLE_TYPE_URANIUM && closeColliding(neutron, fuel)) {
+
+                // Handle uranium collision
+                if (fuel.type == ParticleType.URANIUM && closeColliding(neutron, fuel)) {
                     click = true;
                     neutrons.remove(i);
                     i--;
-                    neutrons.add(new Particle(neutron.x, neutron.y, Math.random() * PI2, NEUTRON_SPEED, NEUTRON_RADIUS,
-                            Particle.PARTICLE_TYPE_NEUTRON));
-                    neutrons.add(new Particle(neutron.x, neutron.y, Math.random() * PI2, NEUTRON_SPEED, NEUTRON_RADIUS,
-                            Particle.PARTICLE_TYPE_NEUTRON));
-                    neutrons.add(new Particle(neutron.x, neutron.y, Math.random() * PI2, NEUTRON_SPEED, NEUTRON_RADIUS,
-                            Particle.PARTICLE_TYPE_NEUTRON));
 
-                    fuel.type = Particle.PARTICLE_TYPE_DEPLETED;
+                    // Create three new neutrons
+                    for (int k = 0; k < 3; k++) {
+                        neutrons.add(new Particle(neutron.x, neutron.y, Math.random() * PI2, ParticleType.NEUTRON));
+                    }
+
+                    fuel.setType(ParticleType.DEPLETED);
                     break searchForNeutronLoop;
-                } else if (fuel.type == Particle.PARTICLE_TYPE_GRAPHITE && closeColliding(neutron, fuel)) {
+                }
+                // Handle graphite collision
+                else if (fuel.type == ParticleType.GRAPHITE && closeColliding(neutron, fuel)) {
                     click = true;
                     neutrons.remove(i);
                     i--;
-
-                    fuel.type = Particle.PARTICLE_TYPE_DEPLETED;
+                    fuel.setType(ParticleType.DEPLETED);
                     break searchForNeutronLoop;
                 }
             }
-
         }
+
         if (click) {
             playAudioAsync("src/geiger.wav");
         }
+
         repaint();
     });
 
     public void paintComponent(Graphics g) {
-
         super.paintComponent(g);
         Graphics2D g2 = (Graphics2D) g;
+
+        this.setBackground(new Color(240, 244, 248));
 
         int dCount = 0;
         int uCount = 0;
         int gCount = 0;
 
         for (Particle p : fuels) {
-            if (p.type == Particle.PARTICLE_TYPE_DEPLETED) {
-                g2.setColor(Color.GRAY);
+            g2.setColor(p.type.getColor());
+
+            // Update counters based on particle type
+            if (p.type == ParticleType.DEPLETED) {
                 dCount++;
-            } else if (p.type == Particle.PARTICLE_TYPE_URANIUM) {
-                g2.setColor(Color.GREEN);
+            } else if (p.type == ParticleType.URANIUM) {
                 uCount++;
-            } else if (p.type == Particle.PARTICLE_TYPE_GRAPHITE) {
-                g2.setColor(Color.BLACK);
+            } else if (p.type == ParticleType.GRAPHITE) {
                 gCount++;
             }
-            
-            double x = p.x - p.r / 2;
-            double y = p.y - p.r / 2;
-            g2.fillOval((int) x, (int) y, (int) p.r, (int) p.r);
+
+            double x = p.x - p.getRadius() / 2;
+            double y = p.y - p.getRadius() / 2;
+            g2.fillOval((int) x, (int) y, (int) p.getRadius(), (int) p.getRadius());
         }
 
-        g2.setColor(Color.blue);
+        g2.setColor(ParticleType.NEUTRON.getColor());
         for (Particle p : neutrons) {
-            double x = p.x - p.r / 2;
-            double y = p.y - p.r / 2;
-            g2.fillOval((int) x, (int) y, (int) p.r, (int) p.r);
+            double x = p.x - p.getRadius() / 2;
+            double y = p.y - p.getRadius() / 2;
+            g2.fillOval((int) x, (int) y, (int) p.getRadius(), (int) p.getRadius());
         }
 
-        g2.setColor(Color.BLACK);
-        g2.drawString("N:" + neutrons.size() + ",F:" + fuels.size() + "[D:" + dCount + ",U:" + uCount + ",G:" + gCount + "]", 10, 15);
-        g2.drawString("T:" + String.format("%.3f", temperature), 10, 25);
-
+        g2.setColor(ParticleType.DEPLETED.getColor());
+        g2.drawString(
+                "N:" + neutrons.size() + ",F:" + fuels.size() + "[D:" + dCount + ",U:" + uCount + ",G:" + gCount + "]",
+                10, 20);
+        g2.drawString("T:" + String.format("%.3f", temperature), 10, 35);
     }
 
     @Override
