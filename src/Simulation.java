@@ -21,7 +21,10 @@ import javax.swing.Timer;
 import javax.sound.sampled.*;
 
 import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.PrintWriter;
 
 public class Simulation extends JPanel implements MouseListener, MouseMotionListener, KeyListener {
 
@@ -45,50 +48,92 @@ public class Simulation extends JPanel implements MouseListener, MouseMotionList
         return distance < Math.max(a.getRadius(), b.getRadius());
     }
 
+    // Simulation objects
     private ArrayList<Particle> neutrons;
     private ArrayList<Particle> fuels;
     private ArrayList<Rectangle> graphiteBlocks;
     
-    private double temperature = 0;
+    // Simulation variables
+    private double temperature;
+    private double energyOutput;
     private int screenWidth;
     private int screenHeight;
+
+    // Logging
+    private File logFile;
+    private LogManager logManager;
+    private int dCount;
+    private int uCount;
+    private int gCount;
 
     // FLAGS
     private static boolean ENABLE_CHAIN_REACTION_TRACE = false; // enable the lines showing chain reactions
     private static boolean ENABLE_DEBUG_STATS = true; // enable temperature, and particle count stats
     private static boolean ENABLE_GEIGER_CLICK = true; // enable geiger click sound playing
+    private static boolean ENABLE_DATA_LOGGING = true;
 
     // CONSTANTS
+    private static final int DATA_LOG_PAUSE = 10; // How many frames between each collection of data
     private static final int INITIAL_STRAY_NEUTRON_COUNT = 10;
     private static final long CHAIN_REACTION_LIFETIME = 3000; // Lifespan in ms of chain reaction lines
     private static final int MAX_LINE_ALPHA = 100; // Maximum opacity for reaction lines
     private static final double PI2 = Math.PI * 2; // 2π
     private static final double NEUTRON_DECAY_PROB = 0.01; // Probability for a neutron to decay and increase ambient temperature
-    private static final double DEPLETED_RECAY_PROB = 0.001; // Probability for a depleted particle to turn back to uranium (simulate refueling)
-    private static final double DEPLETED_DECAY_PROB = 0.001; // Probability for a depleted particle to turn to graphite
+    private static final double DEPLETED_TO_URANIUM_PROB = 0.01; // Probability for a depleted particle to turn back to uranium (simulate refueling)
+    private static final double DEPLETED_TO_GRAPHITE_PROB = 0.005; // Probability for a depleted particle to turn to graphite
     private static final double IDLE_TEMP_MUL = 0.98; // The temperature gets multiplied by this every frame
-
+    
     private void initializeParticleGrid(int numParticles, double spacing, double uraniumChance) {
         // Calculate grid dimensions to make it as square as possible
-        int cols = (int) Math.ceil(Math.sqrt(numParticles));
-        int rows = (int) Math.ceil(numParticles / (double) cols);
-
+        int cols = (int)Math.ceil(Math.sqrt(numParticles));
+        int rows = (int)Math.ceil(numParticles / (double)cols);
+        
+        
         // Calculate starting position to center the grid
         double startX = (screenWidth - (cols - 1) * spacing) / 2;
         double startY = (screenHeight - (rows - 1) * spacing) / 2;
-
+        
         int particlesCreated = 0;
-
+        
         for (int row = 0; row < rows && particlesCreated < numParticles; row++) {
+            int currentCol = 0; // Keep track of actual column position
+            
             for (int col = 0; col < cols && particlesCreated < numParticles; col++) {
-                double x = startX + col * spacing;
-                double y = startY + row * spacing;
 
+                
+                // Add fuel particle
+                double x = startX + currentCol * spacing;
+                double y = startY + row * spacing;
+                
                 ParticleType type = Math.random() < uraniumChance ? ParticleType.URANIUM : ParticleType.DEPLETED;
                 fuels.add(new Particle(x, y, type));
                 particlesCreated++;
+                currentCol++;
             }
         }
+    }
+
+    // Determines collision and direction
+    public static String checkCollision(double circleX, double circleY, double radius, double rectX, double rectY, double rectWidth, double rectHeight) {
+        double closestX = clamp(circleX, rectX, rectX + rectWidth);
+        double closestY = clamp(circleY, rectY, rectY + rectHeight);
+
+        double distX = circleX - closestX;
+        double distY = circleY - closestY;
+        double distanceSquared = distX * distX + distY * distY;
+
+        if (distanceSquared > radius * radius) return "No collision";
+
+        if (Math.abs(distX) > Math.abs(distY)) {
+            return distX < 0 ? "Left" : "Right";
+        } else {
+            return distY < 0 ? "Top" : "Bottom";
+        }
+    }
+    
+    // Clamps a value between a min and max
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(value, max));
     }
 
     public Simulation(int w, int h) {
@@ -98,24 +143,49 @@ public class Simulation extends JPanel implements MouseListener, MouseMotionList
         this.addMouseMotionListener(this);
         this.addKeyListener(this);
 
+        // Set up the screen
         this.screenWidth = w;
         this.screenHeight = h;
 
         // Create the particle lists
         neutrons = new ArrayList<Particle>();
         fuels = new ArrayList<Particle>();
+        graphiteBlocks = new ArrayList<Rectangle>();
 
         // Create initial stray neutrons
         for (int i = 0; i < INITIAL_STRAY_NEUTRON_COUNT; i++) {
-            double x = Math.random() * screenWidth;
-            double y = Math.random() * screenHeight;
-            double theta = Math.random() * PI2;
-            neutrons.add(new Particle(x, y, theta, ParticleType.NEUTRON));
+            
+            // Create a neutron
+            String interaction = "";
+            createNeutronLoop: for (int attempts = 0; attempts < 10; attempts++) {
+                double x = Math.random() * screenWidth;
+                double y = Math.random() * screenHeight;
+                double theta = Math.random() * PI2;
+                Particle neutron = new Particle(x, y, theta, ParticleType.NEUTRON);
+                
+                // Check if it is inside a graphite block
+                for (Rectangle block : graphiteBlocks) {
+                    interaction = checkCollision(neutron.x, neutron.y, neutron.type.getRadius(), block.x, block.y, block.getWidth(), block.getHeight());
+                    if (interaction.equals("No collision")) {
+                        break createNeutronLoop;
+                    }
+                    System.out.println("Failed to create, on attempt #" + attempts + ".");
+                }
+            }
         }
 
         // Create a grid of uranium particles
         initializeParticleGrid(100, 50, 0.3);
 
+        // Setup data logging
+        if (ENABLE_DATA_LOGGING) {
+            logFile = new File("log.csv");
+            logManager = new LogManager(logFile);
+            logManager.clear();
+            logManager.println("Δt,t,Σe,n,d,u,g");
+        }
+
+        // Start the simulation
         t.start();
     }
 
@@ -127,12 +197,12 @@ public class Simulation extends JPanel implements MouseListener, MouseMotionList
             fuel.tick();
 
             // Chance to turn Depleted to Uranium
-            if (fuel.type == ParticleType.DEPLETED && Math.random() < DEPLETED_RECAY_PROB) {
+            if (fuel.type == ParticleType.DEPLETED && Math.random() < DEPLETED_TO_URANIUM_PROB) {
                 fuel.setType(ParticleType.URANIUM);
             }
 
             // Chance to turn Depleted to Graphite
-            else if (fuel.type == ParticleType.DEPLETED && Math.random() < DEPLETED_DECAY_PROB) {
+            else if (fuel.type == ParticleType.DEPLETED && Math.random() < DEPLETED_TO_GRAPHITE_PROB) {
                 fuel.setType(ParticleType.GRAPHITE);
                 neutrons.add(new Particle(fuel.x, fuel.y, Math.random() * PI2, ParticleType.NEUTRON));
             }
@@ -199,10 +269,23 @@ public class Simulation extends JPanel implements MouseListener, MouseMotionList
         }
     }
 
-    private Timer t = new Timer(1000 / 10, (e) -> {
+    private int framesSinceLog = DATA_LOG_PAUSE;
+    private Timer t = new Timer(1000 / 60, (e) -> {
         
         // Decrease the temperature
-        temperature *= IDLE_TEMP_MUL;
+        double temperatureChange = temperature * (1 - IDLE_TEMP_MUL);
+        temperature -= temperatureChange;
+        energyOutput += temperatureChange;
+
+        if (ENABLE_DATA_LOGGING) {
+            if (framesSinceLog >= DATA_LOG_PAUSE) {
+                framesSinceLog = 0;
+                logManager.println(String.format("%.3f,%.3f,%.3f,%d,%d,%d,%d", temperatureChange, temperature, energyOutput, neutrons.size(), dCount, uCount, gCount));
+                System.out.println("Logged!");
+            } else {
+                framesSinceLog++;
+            }
+        }
 
         // Simulate
         simulateDegradation();
@@ -254,10 +337,17 @@ public class Simulation extends JPanel implements MouseListener, MouseMotionList
         }
 
         // Set up counters for stats
-        int dCount = 0;
-        int uCount = 0;
-        int gCount = 0;
+        dCount = 0;
+        uCount = 0;
+        gCount = 0;
 
+        // Draw fuel rods
+        g2.setColor(ParticleType.GRAPHITE.getColor());
+        for (Rectangle r : graphiteBlocks) {
+            g2.fill(r);
+        }
+
+        // Draw fuel
         for (Particle p : fuels) {
             g2.setColor(p.type.getColor());
 
@@ -284,12 +374,14 @@ public class Simulation extends JPanel implements MouseListener, MouseMotionList
             g2.fillOval((int) x, (int) y, (int) p.getRadius(), (int) p.getRadius());
         }
 
-        if (ENABLE_GEIGER_CLICK) {
+
+        if (ENABLE_DEBUG_STATS) {
             g2.setColor(ParticleType.DEPLETED.getColor());
             g2.drawString(
-                    "N:" + neutrons.size() + ",F:" + fuels.size() + "[D:" + dCount + ",U:" + uCount + ",G:" + gCount + "]",
+                    "Neutrons: " + neutrons.size() + ", Fuels: " + fuels.size() + "[D:" + dCount + ",U:" + uCount + ",G:" + gCount + "]",
                     10, 20);
-            g2.drawString("T:" + String.format("%.3f", temperature), 10, 35);
+            g2.drawString("Temperature: " + String.format("%.3f", temperature), 10, 35);
+            g2.drawString("Energy out: " + String.format("%.3f", energyOutput), 10, 50);
         }
     }
 
